@@ -124,6 +124,7 @@ def run_osv_scanner(repo_dir: Path, raw_out: Path = None) -> List[Finding]:
                             "affected": v.get("affected"),
                             "references": v.get("references"),
                             "engine": "osv-scanner",
+                            "severity": severity_data,
                             "cmd": cmd,
                             "returncode": returncode,
                             "stderr": stderr[:2000] if stderr else None,

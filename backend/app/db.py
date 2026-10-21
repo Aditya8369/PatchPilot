@@ -41,7 +41,8 @@ async def init_db():
                 false_positive  INTEGER DEFAULT NULL,
                 labeled_at      TEXT DEFAULT NULL,
                 version         INTEGER DEFAULT 1,
-                created_at      TEXT DEFAULT (datetime('now'))
+                created_at      TEXT DEFAULT (datetime('now')),
+                severity_score  REAL DEFAULT 5.0
             )
         """)
         await db.execute("""
@@ -128,6 +129,11 @@ async def init_db():
         if "status" not in columns:
             await db.execute(
                 "ALTER TABLE findings ADD COLUMN status TEXT DEFAULT 'open'"
+            )
+
+        if "severity_score" not in columns:
+            await db.execute(
+                "ALTER TABLE findings ADD COLUMN severity_score REAL DEFAULT 5.0"
             )
 
         cursor = await db.execute("PRAGMA table_info(jobs)")
@@ -232,15 +238,29 @@ async def delete_job(db: aiosqlite.Connection, job_id: str):
 async def create_findings(
     db: aiosqlite.Connection, findings_rows: List[Tuple[Any, ...]]
 ):
-    await db.executemany(
-        """
-        INSERT INTO findings (
-            id, job_id, rule_id, title, severity, category, file_path, line_number,
-            cwe, scanner, message, package_name, package_version, ml_score, features
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        findings_rows,
-    )
+    if not findings_rows:
+        return
+    if len(findings_rows[0]) >= 16:
+        await db.executemany(
+            """
+            INSERT INTO findings (
+                id, job_id, rule_id, title, severity, category, file_path, line_number,
+                cwe, scanner, message, package_name, package_version, ml_score, features,
+                severity_score
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            findings_rows,
+        )
+    else:
+        await db.executemany(
+            """
+            INSERT INTO findings (
+                id, job_id, rule_id, title, severity, category, file_path, line_number,
+                cwe, scanner, message, package_name, package_version, ml_score, features
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            findings_rows,
+        )
     await db.commit()
 
 
@@ -250,10 +270,11 @@ async def get_findings_by_job_id(db: aiosqlite.Connection, job_id: str) -> List[
         """
         SELECT id, job_id, rule_id, title, severity, category, file_path,
                line_number, cwe, scanner, message, package_name, package_version,
-               ml_score, features, status, false_positive, labeled_at, version, created_at
+               ml_score, features, status, false_positive, labeled_at, version, created_at,
+               severity_score
         FROM findings
         WHERE job_id = ?
-        ORDER BY created_at
+        ORDER BY severity_score DESC NULLS LAST, created_at
         """,
         (job_id,),
     )
@@ -284,7 +305,8 @@ async def get_finding(db: aiosqlite.Connection, finding_id: str) -> Optional[dic
         """
         SELECT id, job_id, rule_id, title, severity, category, file_path,
                line_number, cwe, scanner, message, package_name, package_version,
-               ml_score, features, status, false_positive, labeled_at, version, created_at
+               ml_score, features, status, false_positive, labeled_at, version, created_at,
+               severity_score
         FROM findings
         WHERE id = ?
         """,

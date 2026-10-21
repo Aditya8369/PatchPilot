@@ -75,7 +75,11 @@ def run_gitleaks(repo_dir: Path, raw_out: Path = None) -> List[Finding]:
                 title=f"Secret detected: {rule}",
                 description=str(desc)[:1000],
                 location=Location(path=path, start_line=start, end_line=end),
-                metadata={"engine": "gitleaks", "rule": rule},
+                metadata={
+                    "engine": "gitleaks",
+                    "rule": rule,
+                    "Confidence": item.get("Confidence"),
+                },
                 features=ml_features,  # <--- INJECTED HERE
             )
         )

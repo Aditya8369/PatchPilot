@@ -54,6 +54,7 @@ from .db import (
 from .ml.deduplicator import SENTENCE_TRANSFORMERS_AVAILABLE, deduplicate
 from .ml.fp_predictor import predictor
 from .ml.ranker import load_ranker, scoring_function
+from .ml.severity_ranker import rank
 from .models import (
     Finding,
     FindingStatusUpdate,
@@ -357,15 +358,21 @@ def _scan_repo_dir(
     findings.extend(gitleaks)
     findings.extend(entropy)
 
+    # Prioritize findings using the normalized severity ranker (Tier 1)
+    findings = rank(findings)
+
+    # Score with ML ranker if a trained model is present
     findings = scoring_function(findings, RANKER)
 
     if RANKER:
         findings.sort(
-            key=lambda f: getattr(f, "ml_score", 0.0),
+            key=lambda f: (
+                getattr(f, "ml_score", 0.0)
+                if getattr(f, "ml_score", None) is not None
+                else 0.0
+            ),
             reverse=True,
         )
-    else:
-        findings = _prioritize_findings(findings)
 
     return semgrep, osv, gitleaks, entropy, findings
 
@@ -664,6 +671,11 @@ async def _run_single_scan_task(
                         pkg_version,
                         f.ml_score,
                         json.dumps(f.features) if f.features else None,
+                        (
+                            getattr(f, "severity_score", None)
+                            if getattr(f, "severity_score", None) is not None
+                            else 5.0
+                        ),
                     )
                 )
             if rows:
@@ -1582,6 +1594,11 @@ async def _run_repo_scan_task(
                             pkg_version,
                             f.ml_score,
                             json.dumps(f.features) if f.features else None,
+                            (
+                                getattr(f, "severity_score", None)
+                                if getattr(f, "severity_score", None) is not None
+                                else 5.0
+                            ),
                         )
                     )
 
