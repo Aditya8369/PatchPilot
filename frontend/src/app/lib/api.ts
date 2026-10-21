@@ -55,6 +55,7 @@ features?: Record<string, unknown>;
   suggested_fix?: string;
   references?: string[];
   ml_score?: number;
+  severity_score?: number | null;
   false_positive?: boolean | number | null;
   version?: number;
 };

@@ -4,12 +4,8 @@ import copy
 import math
 from typing import Any, List, Optional
 
-try:
-    from cvss import CVSSError
-    from cvss.parser import parse_cvss_from_text
-except ImportError:  # Fallback if cvss package is not yet loaded
-    parse_cvss_from_text = None
-    CVSSError = Exception
+from cvss import CVSS2, CVSS3, CVSS4, CVSSError
+from cvss.parser import parse_cvss_from_text
 
 # Semgrep categorical severity mapping.
 # Semgrep rule adapters in PatchPilot normalize raw severities where third-party rules can
@@ -73,30 +69,24 @@ def _parse_cvss_score_from_vector(vector_str: str) -> Optional[float]:
     cleaned = vector_str.strip()
 
     # Try parsing using cvss package parser
-    if parse_cvss_from_text is not None:
-        try:
-            vectors = parse_cvss_from_text(cleaned)
-            if vectors:
-                score = float(vectors[0].base_score)
-                if _is_valid_numeric_score(score):
-                    return round(score, 1)
-        except (CVSSError, Exception):
-            pass
+    try:
+        vectors = parse_cvss_from_text(cleaned)
+        if vectors:
+            score = float(vectors[0].base_score)
+            if _is_valid_numeric_score(score):
+                return round(score, 1)
+    except (CVSSError, ValueError, TypeError):
+        pass
 
     # Try direct CVSS classes if parse_cvss_from_text didn't pick it up
-    try:
-        from cvss import CVSS2, CVSS3, CVSS4
-
-        for cls in (CVSS3, CVSS2, CVSS4):
-            try:
-                v = cls(cleaned)
-                score = float(v.base_score)
-                if _is_valid_numeric_score(score):
-                    return round(score, 1)
-            except (CVSSError, Exception):
-                continue
-    except ImportError:
-        pass
+    for cls in (CVSS3, CVSS2, CVSS4):
+        try:
+            v = cls(cleaned)
+            score = float(v.base_score)
+            if _is_valid_numeric_score(score):
+                return round(score, 1)
+        except (CVSSError, ValueError, TypeError):
+            continue
 
     return None
 
@@ -145,12 +135,12 @@ def calculate_severity_score(finding: Any) -> float:
          - WARNING: 6.0
          - INFO: 3.0
          - missing/unknown: 5.0
-      3. Gitleaks confidence mapping (policy-derived triage scores):
-         - HIGH: 8.0
-         - MEDIUM: 5.0
-         - LOW: 2.0
-         - Note: Gitleaks reports detection confidence, not CVSS vulnerability impact.
-           These values represent operational triage priority for exposed secrets.
+      3. Secret Detection & Triage Mapping (policy-derived operational triage scores, NOT CVSS metrics):
+         - High-entropy secrets (Shannon entropy >= 4.5) or explicit HIGH confidence: 8.0
+         - High-impact secret rules (private keys, AWS credentials, GitHub tokens, Slack webhooks): 8.0
+         - Moderate-entropy tokens (Shannon entropy >= 3.0) or explicit MEDIUM confidence: 6.0 / 5.0
+         - Low-entropy tokens (Shannon entropy < 3.0) or explicit LOW confidence: 4.0 / 2.0
+         - Default unclassified secrets fallback: 5.0 (Medium operational triage priority)
       4. Generic/normalized severity labels (CRITICAL: 9.0, HIGH: 8.0, ERROR: 8.0,
          MEDIUM: 5.0, WARNING: 5.0, LOW: 2.0, INFO: 1.0).
       5. Pre-existing valid numeric severity_score (within 0.0–10.0).
@@ -232,19 +222,29 @@ def calculate_severity_score(finding: Any) -> float:
         return DEFAULT_FALLBACK_SCORE
 
     # -------------------------------------------------------------
-    # 3. Gitleaks Confidence Mapping
+    # 3. Secret Detection & Triage Mapping (Gitleaks / Entropy)
     # -------------------------------------------------------------
-    is_gitleaks = (
+    # Note: Gitleaks v8 reports do not natively emit a "Confidence" field.
+    # Scores below are policy-derived operational triage scores (NOT CVSS metrics):
+    # - If explicit Confidence is provided (via custom adapters): HIGH: 8.0, MEDIUM: 5.0, LOW: 2.0.
+    # - If Shannon entropy metadata is available: >=4.5 -> 8.0, >=3.0 -> 6.0, <3.0 -> 4.0.
+    # - If a high-impact secret rule is matched: 8.0.
+    # - Otherwise, secret findings default to policy triage score 5.0 (Medium).
+    is_secret = (
         "gitleaks" in scanner_str
+        or "entropy" in scanner_str
+        or data.get("category") == "secret"
         or "Confidence" in data
         or "confidence" in data
         or "Confidence" in metadata
         or "confidence" in metadata
         or "RuleID" in data
         or finding_id.startswith("gitleaks:")
+        or finding_id.startswith("entropy:")
     )
 
-    if is_gitleaks:
+    if is_secret:
+        # Check explicit Confidence metadata if present
         conf = (
             data.get("Confidence")
             or data.get("confidence")
@@ -253,9 +253,42 @@ def calculate_severity_score(finding: Any) -> float:
         )
         if isinstance(conf, str) and conf.strip():
             norm_conf = conf.strip().upper()
-            return GITLEAKS_CONFIDENCE_MAP.get(norm_conf, DEFAULT_FALLBACK_SCORE)
+            if norm_conf in GITLEAKS_CONFIDENCE_MAP:
+                return GITLEAKS_CONFIDENCE_MAP[norm_conf]
 
-        # Policy-derived fallback when Gitleaks emits no confidence
+        # Check Shannon entropy metadata if present (from Gitleaks or entropy scanner)
+        raw_entropy = (
+            data.get("entropy")
+            or data.get("entropy_score")
+            or metadata.get("entropy")
+            or metadata.get("entropy_score")
+        )
+        if _is_valid_numeric_score(raw_entropy):
+            ent_val = float(raw_entropy)
+            if ent_val >= 4.5:
+                return 8.0
+            if ent_val >= 3.0:
+                return 6.0
+            return 4.0
+
+        # Check high-impact secret rule patterns
+        rule_name = str(
+            data.get("RuleID") or metadata.get("rule") or data.get("title") or ""
+        ).lower()
+        if any(
+            pattern in rule_name
+            for pattern in (
+                "private-key",
+                "private_key",
+                "aws",
+                "github-pat",
+                "slack-webhook",
+                "stripe",
+            )
+        ):
+            return 8.0
+
+        # Policy-derived fallback for secrets without specific entropy or rule tier
         return DEFAULT_FALLBACK_SCORE
 
     # -------------------------------------------------------------

@@ -240,27 +240,16 @@ async def create_findings(
 ):
     if not findings_rows:
         return
-    if len(findings_rows[0]) >= 16:
-        await db.executemany(
-            """
-            INSERT INTO findings (
-                id, job_id, rule_id, title, severity, category, file_path, line_number,
-                cwe, scanner, message, package_name, package_version, ml_score, features,
-                severity_score
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            findings_rows,
-        )
-    else:
-        await db.executemany(
-            """
-            INSERT INTO findings (
-                id, job_id, rule_id, title, severity, category, file_path, line_number,
-                cwe, scanner, message, package_name, package_version, ml_score, features
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            findings_rows,
-        )
+    await db.executemany(
+        """
+        INSERT INTO findings (
+            id, job_id, rule_id, title, severity, category, file_path, line_number,
+            cwe, scanner, message, package_name, package_version, ml_score, features,
+            severity_score
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        findings_rows,
+    )
     await db.commit()
 
 

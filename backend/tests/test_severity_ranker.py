@@ -1,3 +1,4 @@
+import asyncio
 import copy
 import os
 import tempfile
@@ -161,41 +162,74 @@ class TestSemgrepExtraction:
 
 
 class TestGitleaksExtraction:
-    def test_gitleaks_high_maps_to_8(self):
+    def test_gitleaks_entropy_high_maps_to_8(self):
         finding = {
             "scanner": "gitleaks",
-            "RuleID": "generic-api-key",
-            "Confidence": "HIGH",
+            "RuleID": "token",
+            "metadata": {"engine": "gitleaks", "entropy": 5.2},
         }
         assert calculate_severity_score(finding) == 8.0
 
-    def test_gitleaks_medium_maps_to_5(self):
+    def test_gitleaks_entropy_medium_maps_to_6(self):
         finding = {
             "scanner": "gitleaks",
-            "RuleID": "jwt-token",
-            "Confidence": "MEDIUM",
+            "RuleID": "token",
+            "metadata": {"engine": "gitleaks", "entropy": 3.8},
         }
-        assert calculate_severity_score(finding) == 5.0
+        assert calculate_severity_score(finding) == 6.0
 
-    def test_gitleaks_low_maps_to_2(self):
+    def test_gitleaks_entropy_low_maps_to_4(self):
         finding = {
             "scanner": "gitleaks",
-            "RuleID": "entropy",
-            "Confidence": "LOW",
+            "RuleID": "token",
+            "metadata": {"engine": "gitleaks", "entropy": 2.1},
         }
-        assert calculate_severity_score(finding) == 2.0
+        assert calculate_severity_score(finding) == 4.0
 
-    def test_gitleaks_case_variations(self):
-        assert calculate_severity_score({"RuleID": "k", "Confidence": "high"}) == 8.0
-        assert calculate_severity_score({"RuleID": "k", "Confidence": "medium"}) == 5.0
-        assert calculate_severity_score({"RuleID": "k", "Confidence": "low"}) == 2.0
+    def test_gitleaks_high_impact_rules_map_to_8(self):
+        assert (
+            calculate_severity_score(
+                {"scanner": "gitleaks", "RuleID": "aws-access-token"}
+            )
+            == 8.0
+        )
+        assert (
+            calculate_severity_score({"scanner": "gitleaks", "RuleID": "private-key"})
+            == 8.0
+        )
+        assert (
+            calculate_severity_score({"scanner": "gitleaks", "RuleID": "slack-webhook"})
+            == 8.0
+        )
 
-    def test_gitleaks_missing_confidence_policy_derived_fallback(self):
+    def test_gitleaks_unclassified_default_fallback_to_5(self):
         finding = {
             "scanner": "gitleaks",
-            "RuleID": "slack-webhook",
+            "RuleID": "generic-custom-secret",
         }
         assert calculate_severity_score(finding) == DEFAULT_FALLBACK_SCORE
+
+    def test_gitleaks_confidence_backward_compatibility(self):
+        assert (
+            calculate_severity_score(
+                {"scanner": "gitleaks", "RuleID": "k", "Confidence": "HIGH"}
+            )
+            == 8.0
+        )
+        assert (
+            calculate_severity_score(
+                {"scanner": "gitleaks", "RuleID": "k", "Confidence": "MEDIUM"}
+            )
+            == 5.0
+        )
+        assert (
+            calculate_severity_score(
+                {"scanner": "gitleaks", "RuleID": "k", "Confidence": "LOW"}
+            )
+            == 2.0
+        )
+        assert calculate_severity_score({"RuleID": "k", "Confidence": "high"}) == 8.0
+        assert calculate_severity_score({"RuleID": "k", "Confidence": "low"}) == 2.0
 
 
 class TestFallbacksAndInvalidInputs:
@@ -405,399 +439,285 @@ class TestRankFunction:
 # =====================================================================
 
 
-@pytest.mark.asyncio
 class TestDatabaseIntegration:
-    async def test_init_db_creates_severity_score_column(self):
-        with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tmp:
-            tmp_path = tmp.name
+    def test_create_findings_and_get_findings_by_job_id_ordering(self):
+        async def _run():
+            with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tmp:
+                tmp_path = tmp.name
 
-        try:
-            async with aiosqlite.connect(tmp_path) as db:
-                # Run init_db logic directly on isolated test database
-                await db.execute("""
-                    CREATE TABLE IF NOT EXISTS findings (
-                        id              TEXT PRIMARY KEY,
-                        job_id          TEXT NOT NULL,
-                        rule_id         TEXT,
-                        title           TEXT,
-                        severity        TEXT,
-                        category        TEXT,
-                        file_path       TEXT,
-                        line_number     INTEGER,
-                        cwe             TEXT,
-                        scanner         TEXT,
-                        message         TEXT,
-                        package_name    TEXT,
-                        package_version TEXT,
-                        ml_score        REAL,
-                        features        TEXT,
-                        status          TEXT DEFAULT 'open',
-                        false_positive  INTEGER DEFAULT NULL,
-                        labeled_at      TEXT DEFAULT NULL,
-                        version         INTEGER DEFAULT 1,
-                        created_at      TEXT DEFAULT (datetime('now')),
-                        severity_score  REAL DEFAULT 5.0
-                    )
-                """)
-                db.row_factory = aiosqlite.Row
-                cursor = await db.execute("PRAGMA table_info(findings)")
-                cols = [row["name"] for row in await cursor.fetchall()]
-                assert "severity_score" in cols
-        finally:
-            if os.path.exists(tmp_path):
-                os.unlink(tmp_path)
+            try:
+                job_id = str(uuid.uuid4())
+                async with aiosqlite.connect(tmp_path) as db:
+                    # Initialize schema
+                    await db.execute("""
+                        CREATE TABLE findings (
+                            id              TEXT PRIMARY KEY,
+                            job_id          TEXT NOT NULL,
+                            rule_id         TEXT,
+                            title           TEXT,
+                            severity        TEXT,
+                            category        TEXT,
+                            file_path       TEXT,
+                            line_number     INTEGER,
+                            cwe             TEXT,
+                            scanner         TEXT,
+                            message         TEXT,
+                            package_name    TEXT,
+                            package_version TEXT,
+                            ml_score        REAL,
+                            features        TEXT,
+                            status          TEXT DEFAULT 'open',
+                            false_positive  INTEGER DEFAULT NULL,
+                            labeled_at      TEXT DEFAULT NULL,
+                            version         INTEGER DEFAULT 1,
+                            created_at      TEXT DEFAULT (datetime('now')),
+                            severity_score  REAL DEFAULT 5.0
+                        )
+                    """)
 
-    async def test_migration_on_legacy_database_without_severity_score(self):
-        with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tmp:
-            tmp_path = tmp.name
+                    # Insert 3 findings with different scores using standard 16-tuple format
+                    rows = [
+                        (
+                            "finding-low",
+                            job_id,
+                            "rule.low",
+                            "Low Risk",
+                            "LOW",
+                            "sast",
+                            "app.py",
+                            1,
+                            None,
+                            "semgrep",
+                            "msg",
+                            None,
+                            None,
+                            None,
+                            None,
+                            2.0,
+                        ),
+                        (
+                            "finding-high",
+                            job_id,
+                            "rule.high",
+                            "High Risk",
+                            "HIGH",
+                            "sast",
+                            "app.py",
+                            10,
+                            None,
+                            "semgrep",
+                            "msg",
+                            None,
+                            None,
+                            None,
+                            None,
+                            9.8,
+                        ),
+                        (
+                            "finding-mid",
+                            job_id,
+                            "rule.mid",
+                            "Mid Risk",
+                            "MEDIUM",
+                            "sast",
+                            "app.py",
+                            5,
+                            None,
+                            "semgrep",
+                            "msg",
+                            None,
+                            None,
+                            None,
+                            None,
+                            6.0,
+                        ),
+                    ]
+                    await create_findings(db, rows)
 
-        try:
-            # 1. Create a legacy table without severity_score
-            async with aiosqlite.connect(tmp_path) as db:
-                await db.execute("""
-                    CREATE TABLE findings (
-                        id              TEXT PRIMARY KEY,
-                        job_id          TEXT NOT NULL,
-                        rule_id         TEXT,
-                        title           TEXT,
-                        severity        TEXT,
-                        category        TEXT,
-                        file_path       TEXT,
-                        line_number     INTEGER,
-                        cwe             TEXT,
-                        scanner         TEXT,
-                        message         TEXT,
-                        package_name    TEXT,
-                        package_version TEXT,
-                        ml_score        REAL,
-                        features        TEXT,
-                        status          TEXT DEFAULT 'open',
-                        false_positive  INTEGER DEFAULT NULL,
-                        labeled_at      TEXT DEFAULT NULL,
-                        version         INTEGER DEFAULT 1,
-                        created_at      TEXT DEFAULT (datetime('now'))
-                    )
-                """)
-                # Insert a legacy finding
-                await db.execute("""
-                    INSERT INTO findings (id, job_id, rule_id, title, severity)
-                    VALUES ('legacy-1', 'job-legacy', 'rule-1', 'Legacy finding', 'HIGH')
-                """)
-                await db.commit()
-
-            # 2. Simulate migration step: check columns and add if missing
-            async with aiosqlite.connect(tmp_path) as db:
-                db.row_factory = aiosqlite.Row
-                cursor = await db.execute("PRAGMA table_info(findings)")
-                columns = [row["name"] for row in await cursor.fetchall()]
-                assert "severity_score" not in columns
-
-                if "severity_score" not in columns:
-                    await db.execute(
-                        "ALTER TABLE findings ADD COLUMN severity_score REAL DEFAULT 5.0"
-                    )
-                    await db.commit()
-
-            # 3. Verify legacy record survived with default score
-            async with aiosqlite.connect(tmp_path) as db:
-                db.row_factory = aiosqlite.Row
-                cursor = await db.execute(
-                    "SELECT id, severity_score FROM findings WHERE id = 'legacy-1'"
-                )
-                row = await cursor.fetchone()
-                assert row is not None
-                assert row["id"] == "legacy-1"
-                assert row["severity_score"] == 5.0
-        finally:
-            if os.path.exists(tmp_path):
-                os.unlink(tmp_path)
-
-    async def test_create_findings_and_get_findings_by_job_id_ordering(self):
-        with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tmp:
-            tmp_path = tmp.name
-
-        try:
-            job_id = str(uuid.uuid4())
-            async with aiosqlite.connect(tmp_path) as db:
-                # Initialize schema
-                await db.execute("""
-                    CREATE TABLE findings (
-                        id              TEXT PRIMARY KEY,
-                        job_id          TEXT NOT NULL,
-                        rule_id         TEXT,
-                        title           TEXT,
-                        severity        TEXT,
-                        category        TEXT,
-                        file_path       TEXT,
-                        line_number     INTEGER,
-                        cwe             TEXT,
-                        scanner         TEXT,
-                        message         TEXT,
-                        package_name    TEXT,
-                        package_version TEXT,
-                        ml_score        REAL,
-                        features        TEXT,
-                        status          TEXT DEFAULT 'open',
-                        false_positive  INTEGER DEFAULT NULL,
-                        labeled_at      TEXT DEFAULT NULL,
-                        version         INTEGER DEFAULT 1,
-                        created_at      TEXT DEFAULT (datetime('now')),
-                        severity_score  REAL DEFAULT 5.0
-                    )
-                """)
-
-                # Insert 3 findings with different scores
-                rows = [
-                    (
-                        "finding-low",
-                        job_id,
-                        "rule.low",
-                        "Low Risk",
-                        "LOW",
-                        "sast",
-                        "app.py",
-                        1,
-                        None,
-                        "semgrep",
-                        "msg",
-                        None,
-                        None,
-                        None,
-                        None,
-                        2.0,
-                    ),
-                    (
+                    # Query findings
+                    results = await get_findings_by_job_id(db, job_id)
+                    assert len(results) == 3
+                    assert [r["id"] for r in results] == [
                         "finding-high",
-                        job_id,
-                        "rule.high",
-                        "High Risk",
-                        "HIGH",
-                        "sast",
-                        "app.py",
-                        10,
-                        None,
-                        "semgrep",
-                        "msg",
-                        None,
-                        None,
-                        None,
-                        None,
-                        9.8,
-                    ),
-                    (
                         "finding-mid",
-                        job_id,
-                        "rule.mid",
-                        "Mid Risk",
-                        "MEDIUM",
-                        "sast",
-                        "app.py",
-                        5,
-                        None,
-                        "semgrep",
-                        "msg",
-                        None,
-                        None,
-                        None,
-                        None,
-                        6.0,
-                    ),
-                ]
-                await create_findings(db, rows)
+                        "finding-low",
+                    ]
+                    assert [r["severity_score"] for r in results] == [9.8, 6.0, 2.0]
+            finally:
+                if os.path.exists(tmp_path):
+                    os.unlink(tmp_path)
 
-                # Query findings
-                results = await get_findings_by_job_id(db, job_id)
-                assert len(results) == 3
-                assert [r["id"] for r in results] == [
-                    "finding-high",
-                    "finding-mid",
-                    "finding-low",
-                ]
-                assert [r["severity_score"] for r in results] == [9.8, 6.0, 2.0]
-        finally:
-            if os.path.exists(tmp_path):
-                os.unlink(tmp_path)
+        asyncio.run(_run())
 
-    async def test_production_init_db_migration_on_legacy_database(self, monkeypatch):
+    def test_production_init_db_migration_on_legacy_database(self, monkeypatch):
         """
         Tests the actual production init_db() migration function against a temporary
-        SQLite database that already contains findings created with the legacy schema.
+        SQLite database containing pre-existing findings created with the legacy schema.
         Verifies:
           1. The real init_db() executes ALTER TABLE findings ADD COLUMN severity_score REAL DEFAULT 5.0.
           2. Pre-existing legacy records survive intact and adopt the 5.0 default.
-          3. Legacy 15-column inserts continue to work without errors.
-          4. New 16-column inserts with explicit severity_scores are persisted properly.
-          5. get_findings_by_job_id() returns findings ordered by severity_score DESC NULLS LAST.
+          3. Standard 16-column inserts with explicit severity_scores are persisted properly.
+          4. get_findings_by_job_id() returns findings ordered by severity_score DESC NULLS LAST.
+          5. Calling init_db() a second time is fully idempotent and introduces no errors or duplicates.
         """
-        with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tmp:
-            tmp_path = tmp.name
 
-        try:
-            # 1. Create a legacy table without severity_score column and populate with legacy rows
-            async with aiosqlite.connect(tmp_path) as db:
-                await db.execute("""
-                    CREATE TABLE findings (
-                        id              TEXT PRIMARY KEY,
-                        job_id          TEXT NOT NULL,
-                        rule_id         TEXT,
-                        title           TEXT,
-                        severity        TEXT,
-                        category        TEXT,
-                        file_path       TEXT,
-                        line_number     INTEGER,
-                        cwe             TEXT,
-                        scanner         TEXT,
-                        message         TEXT,
-                        package_name    TEXT,
-                        package_version TEXT,
-                        ml_score        REAL,
-                        features        TEXT,
-                        status          TEXT DEFAULT 'open',
-                        false_positive  INTEGER DEFAULT NULL,
-                        labeled_at      TEXT DEFAULT NULL,
-                        version         INTEGER DEFAULT 1,
-                        created_at      TEXT DEFAULT (datetime('now'))
+        async def _run():
+            with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tmp:
+                tmp_path = tmp.name
+
+            try:
+                # 1. Create a legacy table without severity_score column and populate with legacy rows
+                async with aiosqlite.connect(tmp_path) as db:
+                    await db.execute("""
+                        CREATE TABLE findings (
+                            id              TEXT PRIMARY KEY,
+                            job_id          TEXT NOT NULL,
+                            rule_id         TEXT,
+                            title           TEXT,
+                            severity        TEXT,
+                            category        TEXT,
+                            file_path       TEXT,
+                            line_number     INTEGER,
+                            cwe             TEXT,
+                            scanner         TEXT,
+                            message         TEXT,
+                            package_name    TEXT,
+                            package_version TEXT,
+                            ml_score        REAL,
+                            features        TEXT,
+                            status          TEXT DEFAULT 'open',
+                            false_positive  INTEGER DEFAULT NULL,
+                            labeled_at      TEXT DEFAULT NULL,
+                            version         INTEGER DEFAULT 1,
+                            created_at      TEXT DEFAULT (datetime('now'))
+                        )
+                    """)
+                    # Insert legacy records
+                    await db.execute("""
+                        INSERT INTO findings (id, job_id, rule_id, title, severity, created_at)
+                        VALUES ('legacy-1', 'job-migration', 'rule-1', 'Legacy finding 1', 'HIGH', '2024-01-01 00:00:00')
+                    """)
+                    await db.execute("""
+                        INSERT INTO findings (id, job_id, rule_id, title, severity, created_at)
+                        VALUES ('legacy-2', 'job-migration', 'rule-2', 'Legacy finding 2', 'LOW', '2024-01-01 00:01:00')
+                    """)
+                    await db.commit()
+
+                # 2. Point production DB_PATH to this temporary legacy database and run production init_db()
+                import app.db
+
+                monkeypatch.setattr(app.db, "DB_PATH", tmp_path)
+                await app.db.init_db()
+
+                # 3. Verify column is added and legacy records survive with 5.0
+                async with aiosqlite.connect(tmp_path) as db:
+                    db.row_factory = aiosqlite.Row
+                    cursor = await db.execute("PRAGMA table_info(findings)")
+                    columns = [row["name"] for row in await cursor.fetchall()]
+                    assert "severity_score" in columns
+
+                    cur = await db.execute(
+                        "SELECT id, severity_score FROM findings WHERE job_id = 'job-migration' ORDER BY created_at"
                     )
-                """)
-                # Insert legacy records
-                await db.execute("""
-                    INSERT INTO findings (id, job_id, rule_id, title, severity, created_at)
-                    VALUES ('legacy-1', 'job-migration', 'rule-1', 'Legacy finding 1', 'HIGH', '2024-01-01 00:00:00')
-                """)
-                await db.execute("""
-                    INSERT INTO findings (id, job_id, rule_id, title, severity, created_at)
-                    VALUES ('legacy-2', 'job-migration', 'rule-2', 'Legacy finding 2', 'LOW', '2024-01-01 00:01:00')
-                """)
-                await db.commit()
+                    rows = await cur.fetchall()
+                    assert len(rows) == 2
+                    assert rows[0]["id"] == "legacy-1"
+                    assert rows[0]["severity_score"] == 5.0
+                    assert rows[1]["id"] == "legacy-2"
+                    assert rows[1]["severity_score"] == 5.0
 
-            # 2. Point production DB_PATH to this temporary legacy database and run production init_db()
-            import app.db
+                    # 4. Verify new 16-column tuple inserts work properly
+                    new_16 = [
+                        (
+                            "new-16-high",
+                            "job-migration",
+                            "rule-4",
+                            "16-tuple high",
+                            "HIGH",
+                            "sast",
+                            "b.py",
+                            5,
+                            None,
+                            "semgrep",
+                            "msg",
+                            None,
+                            None,
+                            None,
+                            None,
+                            9.8,
+                        ),
+                        (
+                            "new-16-low",
+                            "job-migration",
+                            "rule-5",
+                            "16-tuple low",
+                            "LOW",
+                            "sast",
+                            "c.py",
+                            10,
+                            None,
+                            "semgrep",
+                            "msg",
+                            None,
+                            None,
+                            None,
+                            None,
+                            2.0,
+                        ),
+                        (
+                            "new-16-null",
+                            "job-migration",
+                            "rule-6",
+                            "16-tuple null score",
+                            "LOW",
+                            "sast",
+                            "d.py",
+                            15,
+                            None,
+                            "semgrep",
+                            "msg",
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                        ),
+                    ]
+                    await create_findings(db, new_16)
 
-            monkeypatch.setattr(app.db, "DB_PATH", tmp_path)
-            await app.db.init_db()
-
-            # 3. Verify column is added and legacy records survive with 5.0
-            async with aiosqlite.connect(tmp_path) as db:
-                db.row_factory = aiosqlite.Row
-                cursor = await db.execute("PRAGMA table_info(findings)")
-                columns = [row["name"] for row in await cursor.fetchall()]
-                assert "severity_score" in columns
-
-                cur = await db.execute(
-                    "SELECT id, severity_score FROM findings WHERE job_id = 'job-migration' ORDER BY created_at"
-                )
-                rows = await cur.fetchall()
-                assert len(rows) == 2
-                assert rows[0]["id"] == "legacy-1"
-                assert rows[0]["severity_score"] == 5.0
-                assert rows[1]["id"] == "legacy-2"
-                assert rows[1]["severity_score"] == 5.0
-
-                # 4. Verify legacy 15-column tuple insert still works
-                legacy_15 = [
-                    (
-                        "legacy-15",
-                        "job-migration",
-                        "rule-3",
-                        "15-tuple",
-                        "INFO",
-                        "sast",
-                        "a.py",
-                        1,
-                        None,
-                        "semgrep",
-                        "msg",
-                        None,
-                        None,
-                        None,
-                        None,
-                    )
-                ]
-                await create_findings(db, legacy_15)
-
-                # 5. Verify new 16-column tuple insert works
-                new_16 = [
-                    (
+                    # 5. Verify get_findings_by_job_id ordering (severity_score DESC NULLS LAST, created_at)
+                    findings = await get_findings_by_job_id(db, "job-migration")
+                    assert len(findings) == 5
+                    assert [f["id"] for f in findings] == [
                         "new-16-high",
-                        "job-migration",
-                        "rule-4",
-                        "16-tuple high",
-                        "HIGH",
-                        "sast",
-                        "b.py",
-                        5,
-                        None,
-                        "semgrep",
-                        "msg",
-                        None,
-                        None,
-                        None,
-                        None,
-                        9.8,
-                    ),
-                    (
+                        "legacy-1",
+                        "legacy-2",
                         "new-16-low",
-                        "job-migration",
-                        "rule-5",
-                        "16-tuple low",
-                        "LOW",
-                        "sast",
-                        "c.py",
-                        10,
-                        None,
-                        "semgrep",
-                        "msg",
-                        None,
-                        None,
-                        None,
-                        None,
-                        2.0,
-                    ),
-                ]
-                await create_findings(db, new_16)
-
-                # 6. Verify NULLS LAST handling for findings with NULL severity_score
-                null_score_row = [
-                    (
                         "new-16-null",
-                        "job-migration",
-                        "rule-6",
-                        "16-tuple null score",
-                        "LOW",
-                        "sast",
-                        "d.py",
-                        15,
+                    ]
+                    assert [f["severity_score"] for f in findings] == [
+                        9.8,
+                        5.0,
+                        5.0,
+                        2.0,
                         None,
-                        "semgrep",
-                        "msg",
-                        None,
-                        None,
-                        None,
-                        None,
-                        None,
-                    ),
-                ]
-                await create_findings(db, null_score_row)
+                    ]
 
-                # 7. Verify get_findings_by_job_id ordering (severity_score DESC NULLS LAST, created_at)
-                findings = await get_findings_by_job_id(db, "job-migration")
-                assert len(findings) == 6
-                assert [f["id"] for f in findings] == [
-                    "new-16-high",
-                    "legacy-1",
-                    "legacy-2",
-                    "legacy-15",
-                    "new-16-low",
-                    "new-16-null",
-                ]
-                assert [f["severity_score"] for f in findings] == [
-                    9.8,
-                    5.0,
-                    5.0,
-                    5.0,
-                    2.0,
-                    None,
-                ]
-        finally:
-            if os.path.exists(tmp_path):
-                os.unlink(tmp_path)
+                # 6. Verify Idempotency: calling init_db() a second time is non-destructive
+                await app.db.init_db()
+
+                async with aiosqlite.connect(tmp_path) as db:
+                    findings_post = await get_findings_by_job_id(db, "job-migration")
+                    assert len(findings_post) == 5
+                    assert [f["id"] for f in findings_post] == [
+                        "new-16-high",
+                        "legacy-1",
+                        "legacy-2",
+                        "new-16-low",
+                        "new-16-null",
+                    ]
+            finally:
+                if os.path.exists(tmp_path):
+                    os.unlink(tmp_path)
+
+        asyncio.run(_run())

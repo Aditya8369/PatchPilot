@@ -194,17 +194,6 @@ async def ollama_health():
         }
 
 
-def _prioritize_findings(findings: List[Finding]) -> List[Finding]:
-    def score(f: Finding) -> int:
-        sev = {"CRITICAL": 100, "HIGH": 80, "MEDIUM": 50, "LOW": 20, "INFO": 5}.get(
-            f.severity, 10
-        )
-        tw = {"dependency": 25, "secret": 35, "sast": 20}.get(f.category, 10)
-        return sev + tw
-
-    return sorted(findings, key=score, reverse=True)
-
-
 def _extract_dependencies(repo_dir: Path) -> List[tuple[str, str]]:
     """
     Lightweight parser to extract dependencies from common manifests.

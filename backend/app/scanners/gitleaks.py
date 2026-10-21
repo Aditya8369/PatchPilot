@@ -78,6 +78,7 @@ def run_gitleaks(repo_dir: Path, raw_out: Path = None) -> List[Finding]:
                 metadata={
                     "engine": "gitleaks",
                     "rule": rule,
+                    "entropy": item.get("Entropy"),
                     "Confidence": item.get("Confidence"),
                 },
                 features=ml_features,  # <--- INJECTED HERE

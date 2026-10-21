@@ -106,7 +106,11 @@ erDiagram
     FINDINGS {
         string id
         string job_id
+        string severity
+        float severity_score
+        float ml_score
         boolean false_positive
+        string status
     }
     VERIFICATION_RESULTS {
         string id
@@ -131,6 +135,21 @@ PatchPilot is actively transitioning from static rules to intelligent analysis. 
 * **Tier 1 — Triage:** Severity Ranking, Semantic Deduplication, and False Positive Classification.
 * **Tier 2 — Predictive:** Fix Success Prediction, Pattern Clustering, and Exploit Likelihood Scoring.
 * **Tier 3 — Autonomous:** Local LLM Patch Generation, Self-Healing Verification Loops, and Reinforcement Feedback Systems.
+
+### Scoring Architecture: `severity_score` vs `ml_score`
+
+PatchPilot incorporates a two-tier finding prioritization model:
+
+* **`severity_score` (0.0–10.0 scale, deterministic baseline):**
+  Computed immediately post-scan by `backend/app/ml/severity_ranker.py`. Normalizes multi-scanner telemetry according to standards- and policy-driven precedence:
+  1. **CVSS Vectors (OSV-Scanner):** Parsed via `cvss>=3.0` across CVSS v2, v3.0, v3.1, and v4.0.
+  2. **Static Analysis (Semgrep):** Categorical severity mapped consistently (`CRITICAL`/`ERROR`: 9.0, `WARNING`: 6.0, `INFO`: 3.0).
+  3. **Secrets & Entropy (Gitleaks / Entropy):** Policy-derived triage scores based on Shannon entropy (`>= 4.5` -> 8.0, `>= 3.0` -> 6.0) or high-impact credential patterns (8.0).
+  4. **Fallback Default (5.0):** Unclassified or unassessed findings default to 5.0 (Medium) so they receive necessary human inspection rather than being hidden beneath confirmed low-severity issues.
+  - Stored in the SQLite `findings.severity_score` column and dictates default retrieval ordering: `ORDER BY severity_score DESC NULLS LAST, created_at`.
+
+* **`ml_score` (0.0–1.0 scale, probabilistic ML ranking):**
+  Computed when a trained model (`ranker.pkl`) is loaded in `backend/app/ml/models/`. Uses contextual embeddings (CodeBERT) and engineered features to assess fix likelihood or urgency. When loaded, findings are re-ordered by `ml_score DESC`.
 
 ### Training Data Flow
 
