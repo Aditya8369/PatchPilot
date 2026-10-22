@@ -288,15 +288,14 @@ def calculate_severity_score(finding: Any) -> float:
             if norm_conf in GITLEAKS_CONFIDENCE_MAP:
                 return GITLEAKS_CONFIDENCE_MAP[norm_conf]
 
-        # Check high-impact secret rule patterns before entropy thresholds
-        for candidate in (
-            data.get("RuleID"),
-            data.get("rule_id"),
-            metadata.get("rule"),
-            data.get("title"),
-        ):
-            if candidate and _is_high_impact_secret_rule(str(candidate)):
-                return 8.0
+        # Check high-impact secret rule patterns before entropy thresholds.
+        # Resolve rule identifier strictly from explicit fields in priority order
+        # to ensure incidental title or path text cannot cause false-positive matches.
+        rule_identifier = (
+            data.get("RuleID") or data.get("rule_id") or metadata.get("rule") or ""
+        )
+        if rule_identifier and _is_high_impact_secret_rule(str(rule_identifier)):
+            return 8.0
 
         # Check Shannon entropy metadata if present (from Gitleaks or entropy scanner)
         raw_entropy = (

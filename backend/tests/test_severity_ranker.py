@@ -305,6 +305,25 @@ class TestGitleaksExtraction:
             == DEFAULT_FALLBACK_SCORE
         )
 
+    def test_incidental_title_does_not_override_generic_rule_id(self):
+        # 1. RuleID="token", title contains "aws", entropy 2.0 -> scores 4.0
+        f_token_aws = {
+            "scanner": "gitleaks",
+            "RuleID": "token",
+            "title": "Access token found in aws deployment config",
+            "metadata": {"engine": "gitleaks", "entropy": 2.0},
+        }
+        assert calculate_severity_score(f_token_aws) == 4.0
+
+        # 2. RuleID="generic-api-key", title contains "stripe", entropy 2.0 -> scores 4.0
+        f_generic_stripe = {
+            "scanner": "gitleaks",
+            "RuleID": "generic-api-key",
+            "title": "Secret in stripe_checkout.html",
+            "metadata": {"engine": "gitleaks", "entropy": 2.0},
+        }
+        assert calculate_severity_score(f_generic_stripe) == 4.0
+
 
 class TestFallbacksAndInvalidInputs:
     def test_empty_finding_returns_fallback(self):
