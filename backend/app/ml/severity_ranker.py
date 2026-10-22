@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import math
+import re
 from typing import Any, List, Optional
 
 from cvss import CVSS2, CVSS3, CVSS4, CVSSError
@@ -44,6 +45,37 @@ GENERIC_SEVERITY_MAP = {
 # beneath confirmed low-severity findings (LOW = 2.0, INFO = 1.0/3.0), ensuring they receive
 # necessary human inspection.
 DEFAULT_FALLBACK_SCORE = 5.0
+
+# Boundary-aware pattern to match AWS rule identifiers (e.g., "aws-access-token", "aws_secret", "aws")
+# without matching substrings in unrelated tokens such as "laws-token" or "flaws".
+_AWS_RULE_PATTERN = re.compile(r"(?:^|[^a-zA-Z0-9])aws(?:[^a-zA-Z0-9]|$)")
+
+_RECOGNIZED_AWS_RULES = {
+    "aws",
+    "aws-access-token",
+    "aws-access-key-id",
+    "aws-secret-access-key",
+    "aws-mws-token",
+    "aws-session-token",
+}
+
+_HIGH_IMPACT_RULE_PATTERNS = (
+    "private-key",
+    "private_key",
+    "github-pat",
+    "slack-webhook",
+    "stripe",
+)
+
+
+def _is_high_impact_secret_rule(rule_name: str) -> bool:
+    """Return True if rule_name matches recognized high-impact secret patterns."""
+    if not rule_name:
+        return False
+    lowered = rule_name.lower().strip()
+    if lowered in _RECOGNIZED_AWS_RULES or _AWS_RULE_PATTERN.search(lowered):
+        return True
+    return any(pattern in lowered for pattern in _HIGH_IMPACT_RULE_PATTERNS)
 
 
 def _is_valid_numeric_score(val: Any) -> bool:
@@ -136,8 +168,8 @@ def calculate_severity_score(finding: Any) -> float:
          - INFO: 3.0
          - missing/unknown: 5.0
       3. Secret Detection & Triage Mapping (policy-derived operational triage scores, NOT CVSS metrics):
-         - High-entropy secrets (Shannon entropy >= 4.5) or explicit HIGH confidence: 8.0
          - High-impact secret rules (private keys, AWS credentials, GitHub tokens, Slack webhooks): 8.0
+         - High-entropy secrets (Shannon entropy >= 4.5) or explicit HIGH confidence: 8.0
          - Moderate-entropy tokens (Shannon entropy >= 3.0) or explicit MEDIUM confidence: 6.0 / 5.0
          - Low-entropy tokens (Shannon entropy < 3.0) or explicit LOW confidence: 4.0 / 2.0
          - Default unclassified secrets fallback: 5.0 (Medium operational triage priority)
@@ -227,8 +259,8 @@ def calculate_severity_score(finding: Any) -> float:
     # Note: Gitleaks v8 reports do not natively emit a "Confidence" field.
     # Scores below are policy-derived operational triage scores (NOT CVSS metrics):
     # - If explicit Confidence is provided (via custom adapters): HIGH: 8.0, MEDIUM: 5.0, LOW: 2.0.
+    # - If a high-impact secret rule is matched: 8.0 (retained regardless of entropy).
     # - If Shannon entropy metadata is available: >=4.5 -> 8.0, >=3.0 -> 6.0, <3.0 -> 4.0.
-    # - If a high-impact secret rule is matched: 8.0.
     # - Otherwise, secret findings default to policy triage score 5.0 (Medium).
     is_secret = (
         "gitleaks" in scanner_str
@@ -256,6 +288,16 @@ def calculate_severity_score(finding: Any) -> float:
             if norm_conf in GITLEAKS_CONFIDENCE_MAP:
                 return GITLEAKS_CONFIDENCE_MAP[norm_conf]
 
+        # Check high-impact secret rule patterns before entropy thresholds
+        for candidate in (
+            data.get("RuleID"),
+            data.get("rule_id"),
+            metadata.get("rule"),
+            data.get("title"),
+        ):
+            if candidate and _is_high_impact_secret_rule(str(candidate)):
+                return 8.0
+
         # Check Shannon entropy metadata if present (from Gitleaks or entropy scanner)
         raw_entropy = (
             data.get("entropy")
@@ -270,23 +312,6 @@ def calculate_severity_score(finding: Any) -> float:
             if ent_val >= 3.0:
                 return 6.0
             return 4.0
-
-        # Check high-impact secret rule patterns
-        rule_name = str(
-            data.get("RuleID") or metadata.get("rule") or data.get("title") or ""
-        ).lower()
-        if any(
-            pattern in rule_name
-            for pattern in (
-                "private-key",
-                "private_key",
-                "aws",
-                "github-pat",
-                "slack-webhook",
-                "stripe",
-            )
-        ):
-            return 8.0
 
         # Policy-derived fallback for secrets without specific entropy or rule tier
         return DEFAULT_FALLBACK_SCORE

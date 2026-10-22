@@ -231,6 +231,80 @@ class TestGitleaksExtraction:
         assert calculate_severity_score({"RuleID": "k", "Confidence": "high"}) == 8.0
         assert calculate_severity_score({"RuleID": "k", "Confidence": "low"}) == 2.0
 
+    def test_aws_rule_with_moderate_entropy_receives_8(self):
+        finding = {
+            "scanner": "gitleaks",
+            "RuleID": "aws-access-token",
+            "metadata": {"engine": "gitleaks", "entropy": 3.0},
+        }
+        assert calculate_severity_score(finding) == 8.0
+
+    def test_aws_rule_with_low_entropy_receives_8(self):
+        finding = {
+            "scanner": "gitleaks",
+            "RuleID": "aws-access-token",
+            "metadata": {"engine": "gitleaks", "entropy": 2.0},
+        }
+        assert calculate_severity_score(finding) == 8.0
+
+    def test_laws_token_not_classified_as_aws(self):
+        # Unclassified secret without entropy falls back to default 5.0, not 8.0
+        assert (
+            calculate_severity_score({"scanner": "gitleaks", "RuleID": "laws-token"})
+            == DEFAULT_FALLBACK_SCORE
+        )
+        # Moderate entropy (~3.0) receives 6.0, not AWS 8.0
+        assert (
+            calculate_severity_score(
+                {
+                    "scanner": "gitleaks",
+                    "RuleID": "laws-token",
+                    "metadata": {"engine": "gitleaks", "entropy": 3.0},
+                }
+            )
+            == 6.0
+        )
+        # Low entropy (~2.0) receives 4.0, not AWS 8.0
+        assert (
+            calculate_severity_score(
+                {
+                    "scanner": "gitleaks",
+                    "RuleID": "laws-token",
+                    "metadata": {"engine": "gitleaks", "entropy": 2.0},
+                }
+            )
+            == 4.0
+        )
+
+    def test_high_impact_private_key_with_low_entropy_receives_8(self):
+        finding = {
+            "scanner": "gitleaks",
+            "RuleID": "private-key",
+            "metadata": {"engine": "gitleaks", "entropy": 2.0},
+        }
+        assert calculate_severity_score(finding) == 8.0
+
+    def test_boundary_aware_aws_rules_match_valid_identifiers_only(self):
+        # Exact and boundary-delimited AWS rule identifiers receive 8.0
+        assert calculate_severity_score({"scanner": "gitleaks", "RuleID": "aws"}) == 8.0
+        assert (
+            calculate_severity_score(
+                {"scanner": "gitleaks", "RuleID": "aws_access_token"}
+            )
+            == 8.0
+        )
+        assert (
+            calculate_severity_score(
+                {"scanner": "gitleaks", "RuleID": "aws-secret-access-key"}
+            )
+            == 8.0
+        )
+        # Unrelated tokens containing 'aws' as substring do not receive AWS 8.0
+        assert (
+            calculate_severity_score({"scanner": "gitleaks", "RuleID": "flaws-token"})
+            == DEFAULT_FALLBACK_SCORE
+        )
+
 
 class TestFallbacksAndInvalidInputs:
     def test_empty_finding_returns_fallback(self):
