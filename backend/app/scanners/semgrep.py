@@ -85,7 +85,7 @@ def run_semgrep(repo_dir: Path, raw_out: Path = None) -> List[Finding]:
                 title=check_id,
                 description=msg,
                 location=Location(path=path, start_line=start, end_line=end),
-                metadata={"check_id": check_id, "engine": "semgrep"},
+                metadata={"check_id": check_id, "engine": "semgrep", "extra": extra},
                 features=ml_features,
             )
         )

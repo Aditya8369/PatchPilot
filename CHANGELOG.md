@@ -8,7 +8,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/). Pat
 
 ## [Unreleased]
 
-_Changes on `main` that haven't been tagged yet will appear here._
+### Added
+
+- **Severity Ranker (Issue #329)**: Introduced deterministic severity ranking (`backend/app/ml/severity_ranker.py`) that normalizes scanner findings to a 0.0–10.0 scale (`severity_score`) using CVSS vectors (v2, v3, v4 via `cvss>=3.0`), Semgrep categories, and secret/entropy metadata.
+- **Database Schema Migration**: Added `severity_score REAL DEFAULT 5.0` to `findings` table in SQLite, non-destructively migrated in `init_db()` with `ORDER BY severity_score DESC NULLS LAST, created_at`.
+- **Frontend & Architecture Synchronization**: Added `severity_score` to frontend Finding types, mappers, and updated `ARCHITECTURE.md` with scoring hierarchy.
 
 ---
 

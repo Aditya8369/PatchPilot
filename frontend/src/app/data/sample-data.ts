@@ -17,6 +17,7 @@ export interface Finding {
   suggestedFix?: string;
   references?: string[];
   ml_score?: number;
+  severity_score?: number | null;
 }
 
 export interface Job {
